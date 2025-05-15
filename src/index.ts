@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 // Config (Set this in a .env file or directly here)
-const SOLSCAN_API_KEY = process.env.SOLSCAN_API_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3Mzc4MTk5ODMzMzgsImVtYWlsIjoiZG9udmlja3MwMDRAZ21haWwuY29tIiwiYWN0aW9uIjoidG9rZW4tYXBpIiwiYXBpVmVyc2lvbiI6InYyIiwiaWF0IjoxNzM3ODE5OTgzfQ.wr1Iodgbrxar8uzy1Qjg8GxWUsvr869QDqkd-K_QFeY';
+const SOLSCAN_API_KEY = process.env.SOLSCAN_API_KEY || '';
 
 // Solscan API Base
 const SOLSCAN_BASE = 'https://public-api.solscan.io';
