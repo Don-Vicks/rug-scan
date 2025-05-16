@@ -3,10 +3,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 // Config (Set this in a .env file or directly here)
-const SOLSCAN_API_KEY = process.env.SOLSCAN_API_KEY || '';
-
-// Solscan API Base
-const SOLSCAN_BASE = 'https://public-api.solscan.io';
+const HELIUS_RPC_URL = 'https://mainnet.helius-rpc.com/';
+const API_KEY = ''; // Replace with your Helius API key
 
 // Create server instance
 const server = new McpServer({
@@ -18,195 +16,209 @@ const server = new McpServer({
   },
 });
 
-import axios from 'axios';
-
 // Types
 interface TokenMetadata {
   name: string;
   symbol: string;
+  supply: number;
   decimals: number;
-  mintAuthority: string | null;
-  freezeAuthority: string | null;
+  authorities: string[];
 }
 
 interface HolderInfo {
   address: string;
   amount: number;
+  percent: number;
 }
 
-interface TokenRiskReport {
+interface RiskReport {
+  token: string;
+  symbol: string;
   mintAddress: string;
-  riskScore: number; // 0 (safe) to 100 (high risk)
+  totalSupply: number;
+  topHolders: HolderInfo[];
+  riskScore: number;
   flags: string[];
+  explanation: string;
   summary: string;
 }
 
-// Fetch Token Metadata
-async function fetchTokenMetadata(mintAddress: string): Promise<TokenMetadata> {
-  try {
-    const res = await axios.get(`${SOLSCAN_BASE}/token/meta?tokenAddress=${mintAddress}`, {
-      headers: {
-        'accept': 'application/json',
-        'token': SOLSCAN_API_KEY,
+// Fetch Token Metadata using Helius RPC
+async function getAsset(mintAddress: string): Promise<TokenMetadata> {
+  const response = await fetch(`${HELIUS_RPC_URL}?api-key=${API_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: '1',
+      method: 'getAsset',
+      params: {
+        id: mintAddress,
       },
-    });
+    }),
+  });
 
-    const data = res.data;
+  const data = await response.json();
+  const result = data.result;
 
-    return {
-      name: data.name || 'Unknown',
-      symbol: data.symbol || '???',
-      decimals: data.decimals || 0,
-      mintAuthority: data.owner || null,
-      freezeAuthority: data.freezeAuthority || null,
-    };
-  } catch (err) {
-    throw new Error(`Failed to fetch token metadata: ${err}`);
-  }
+  const name = result.content?.metadata?.name || 'Unknown';
+  const symbol = result.content?.metadata?.symbol || 'Unknown';
+  const supply = result.token_info?.supply || 0;
+  const decimals = result.token_info?.decimals || 0;
+  const authorities = result.authorities?.map((auth: any) => auth.address) || [];
+
+  return { name, symbol, supply, decimals, authorities };
 }
 
-// Fetch Token Holders
-async function fetchTopHolders(mintAddress: string): Promise<HolderInfo[]> {
-  try {
-    const res = await axios.get(`${SOLSCAN_BASE}/token/holders?tokenAddress=${mintAddress}&limit=10`, {
-      headers: {
-        'accept': 'application/json',
-        'token': SOLSCAN_API_KEY,
-      },
-    });
+// Fetch Token Holders using Helius RPC
+async function getTokenLargestAccounts(mintAddress: string): Promise<HolderInfo[]> {
+  const response = await fetch(`${HELIUS_RPC_URL}?api-key=${API_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: '1',
+      method: 'getTokenLargestAccounts',
+      params: [mintAddress],
+    }),
+  });
 
-    return res.data.data.map((holder: any) => ({
-      address: holder.owner,
-      amount: parseFloat(holder.amount),
-    }));
-  } catch (err) {
-    throw new Error(`Failed to fetch token holders: ${err}`);
-  }
+  const data = await response.json();
+  const holders = data.result.value;
+
+  return holders.map((holder: any) => ({
+    address: holder.address,
+    amount: parseFloat(holder.uiAmountString),
+    percent: 0, // Will be calculated later
+  }));
 }
 
 // Risk Assessment Logic
-function assessRisk(
-  mintAddress: string,
-  metadata: TokenMetadata,
-  holders: HolderInfo[]
-): TokenRiskReport {
+function analyzeRisks(metadata: TokenMetadata, holders: HolderInfo[], mintAddress: string): RiskReport {
+  const totalSupply = metadata.supply / Math.pow(10, metadata.decimals);
   let riskScore = 0;
   const flags: string[] = [];
 
-  if (metadata.mintAuthority) {
+  // Calculate percentage for each holder
+  holders.forEach((holder) => {
+    holder.percent = (holder.amount / totalSupply) * 100;
+  });
+
+  // Sort holders by amount descending
+  holders.sort((a, b) => b.amount - a.amount);
+
+  // Check if top holder owns more than 50%
+  if (holders.length > 0 && holders[0].percent > 50) {
+    riskScore += 50;
+    flags.push('Top holder owns more than 50% of total supply.');
+  }
+
+  // Check if top 5 holders own more than 90%
+  const top5Total = holders.slice(0, 5).reduce((sum, h) => sum + h.percent, 0);
+  if (top5Total > 90) {
     riskScore += 30;
-    flags.push('Mint authority not renounced');
+    flags.push('Top 5 holders own more than 90% of total supply.');
   }
 
-  if (metadata.freezeAuthority) {
+  // Check for missing authorities
+  if (metadata.authorities.length === 0) {
     riskScore += 20;
-    flags.push('Freeze authority present');
+    flags.push('No authorities found for this token.');
   }
 
-  const totalHeld = holders.reduce((sum, h) => sum + h.amount, 0);
-  const topHolder = holders[0];
-  if (topHolder && totalHeld > 0 && topHolder.amount / totalHeld > 0.5) {
-    riskScore += 25;
-    flags.push('Top holder owns > 50% of supply');
+  // Generate explanation
+  let explanation = 'Risk analysis completed. ';
+  if (flags.length === 0) {
+    explanation += 'No significant risks detected.';
+  } else {
+    explanation += 'Potential risks identified: ' + flags.join(' ');
   }
-
-  if (holders.length < 5) {
-    riskScore += 10;
-    flags.push('Low number of holders');
-  }
-
-  if (riskScore > 100) riskScore = 100;
-
-  const summary = flags.length > 0 ? flags.join('; ') : 'No critical risk factors detected.';
 
   return {
+    token: metadata.name,
+    symbol: metadata.symbol,
     mintAddress,
+    totalSupply,
+    topHolders: holders.slice(0, 5),
     riskScore,
     flags,
-    summary,
+    explanation,
+    summary: flags.length > 0 ? flags.join('; ') : 'No critical risk factors detected.'
   };
 }
 
 // Entry point to scan a token
-export async function scanToken(mintAddress: string): Promise<TokenRiskReport> {
+async function scanToken(mintAddress: string): Promise<RiskReport> {
   try {
-    const metadata = await fetchTokenMetadata(mintAddress);
-    const holders = await fetchTopHolders(mintAddress);
-    const report = assessRisk(mintAddress, metadata, holders);
+    const metadata = await getAsset(mintAddress);
+    const holders = await getTokenLargestAccounts(mintAddress);
+    const report = analyzeRisks(metadata, holders, mintAddress);
     return report;
   } catch (err) {
     throw new Error(`Token scan failed: ${err}`);
   }
 }
 
-
+// Register the tool with the MCP server
 server.tool(
-    "scanToken",
-    "Scan a token for potential issues or risks",
-    {
-      mintAddress: z.string().describe("The mint address of the token"),
-    },
-    async ({ mintAddress }) => {
-      try {
-        const scanResult = await scanToken(mintAddress);
-        if (!scanResult) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Failed to scan token: ${mintAddress}`,
-              },
-            ],
-          };
-        }
-        
-        const issues = scanResult
-        
-        if (!issues) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `No issues found for token: ${mintAddress}\n\n`,
-              },
-            ],
-          };
-        }
-        
+  "scanToken",
+  "Scan this token",
+  {
+    mintAddress: z.string().describe("The mint address of the token"),
+  },
+  async ({ mintAddress }) => {
+    try {
+      const scanResult = await scanToken(mintAddress);
+      if (!scanResult) {
         return {
           content: [
             {
               type: "text",
-              text: `Token Scan Results for ${mintAddress}:\n\n` +
-                    `Risk Score: ${scanResult.riskScore || 'Unknown'}\n\n` +
-                    `Flags: ${scanResult.flags.join(', ')}` +
-                    `\nIdentified Issues:\n${scanResult.summary}`,
-            },
-          ],
-        };
-      } catch (error) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Failed to scan token:`,
+              text: `Failed to scan token: ${mintAddress}`,
             },
           ],
         };
       }
-    },
-  );
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Token Scan Results for ${mintAddress}:\n\n` +
+                  `Token: ${scanResult.token} (${scanResult.symbol})\n` +
+                  `Total Supply: ${scanResult.totalSupply}\n\n` +
+                  `Risk Score: ${scanResult.riskScore}/100\n\n` +
+                  `Top Holders:\n` +
+                  scanResult.topHolders.map((holder, index) => 
+                    `${index + 1}. Address: ${holder.address}, Amount: ${holder.amount}, Percent: ${holder.percent.toFixed(2)}%`
+                  ).join('\n') +
+                  `\n\nFlags:\n` +
+                  scanResult.flags.map(flag => `- ${flag}`).join('\n') +
+                  `\n\nSummary: ${scanResult.explanation}`,
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Failed to scan token: ${error}`,
+          },
+        ],
+      };
+    }
+  },
+);
 
-  async function main() {
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error("Weather MCP Server running on stdio");
-  }
-  
-  main().catch((error) => {
-    console.error("Fatal error in main():", error);
-    process.exit(1);
-  });
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("Weather MCP Server running on stdio");
+}
 
+main().catch((error) => {
+  console.error("Fatal error in main():", error);
+  process.exit(1);
+});
 
-  
